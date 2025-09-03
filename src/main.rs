@@ -15,7 +15,7 @@ use resources::image::{Image, upsert_ready_condition};
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     // Utility: print the CRD manifest and exit
-    if std::env::args().any(|a| a == "--print-crd") {
+    if args.print_crd {
         let crd = Image::crd();
         println!("{}", serde_yaml::to_string(&crd)?);
         return Ok(());
@@ -137,4 +137,7 @@ struct Args {
     /// Retention duration after last unreference (e.g., 60s, 5m, 1h, 2d)
     #[arg(long, value_parser = humantime::parse_duration, default_value = "1h")]
     retention: Duration,
+    /// Print the CRD YAML to stdout and exit
+    #[arg(long = "print-crd")]
+    print_crd: bool,
 }
