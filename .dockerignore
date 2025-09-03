@@ -1,0 +1,10 @@
+target
+.git
+.gitignore
+**/*.swp
+**/*.swo
+**/*.swx
+**/.DS_Store
+**/node_modules
+**/dist
+**/build
