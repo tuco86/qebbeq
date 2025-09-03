@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT"
 license-file = "LICENSE"
+authors = ["Hannes Uebelacker <nope86@gmail.com>"]
+repository = "https://github.com/tuco86/qebbeq"
+homepage = "https://github.com/tuco86/qebbeq"
+readme = "README.md"
 
 [dependencies]
 tokio = { version = "1.47.1", features = ["macros", "rt"] }
