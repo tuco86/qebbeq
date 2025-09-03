@@ -53,6 +53,7 @@ async fn main() -> anyhow::Result<()> {
 async fn reconcile_image(images: Api<Image>, image: Image, retention: Duration) -> anyhow::Result<()> {
     // Ensure our finalizer is present early
     const FINALIZER: &str = "qebbeq.tuco86.dev/finalizer";
+    let is_deleting = image.metadata.deletion_timestamp.is_some();
     if !image
         .metadata
         .finalizers
@@ -90,8 +91,25 @@ async fn reconcile_image(images: Api<Image>, image: Image, retention: Duration) 
             .await?;
     }
 
-    // If no refs: schedule delayed finalizer removal
-    if !has_refs {
+    // If deleting and no refs -> remove finalizer immediately; skip retention
+    if is_deleting && !has_refs {
+        let name = image.name_any();
+        let new_fins: Vec<String> = image
+            .metadata
+            .finalizers
+            .clone()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|f| f != FINALIZER)
+            .collect();
+        let patch = serde_json::json!({ "metadata": { "finalizers": new_fins } });
+        let _ = images
+            .patch(&name, &PatchParams::default(), &Patch::Merge(&patch))
+            .await?;
+    }
+
+    // If not deleting and no refs -> schedule delayed finalizer removal based on retention
+    if !is_deleting && !has_refs {
         let last = status.last_unreferenced.unwrap_or_else(Utc::now);
         let elapsed = (Utc::now() - last).to_std().unwrap_or_default();
         let remaining = if elapsed >= retention { Duration::ZERO } else { retention - elapsed };
