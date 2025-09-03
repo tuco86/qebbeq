@@ -16,7 +16,8 @@ env:
   # github.repository as <account>/<repo>
   IMAGE_NAME: ${{ github.repository }}
   # Change this to control which platforms to build
-  PLATFORMS: linux/amd64,linux/arm64
+  # PLATFORMS: linux/amd64,linux/arm64
+  PLATFORMS: linux/amd64
 
 
 jobs:
