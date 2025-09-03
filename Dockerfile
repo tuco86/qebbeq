@@ -28,7 +28,7 @@ RUN set -e; \
         # NSS bits for DNS resolution
         mkdir -p /out/etc && \
         [ -f /etc/nsswitch.conf ] && cp -v /etc/nsswitch.conf /out/etc/nsswitch.conf || true && \
-        for f in /lib/x86_64-linux-gnu/libnss_files.so.2 /lib/x86_64-linux-gnu/libnss_dns.so.2; do \
+        for f in /lib/*-linux-gnu/libnss_files.so.2 /lib/*-linux-gnu/libnss_dns.so.2; do \
             [ -f "$f" ] && cp -v --parents "$f" /out || true; \
         done
 
