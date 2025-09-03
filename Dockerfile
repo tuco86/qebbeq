@@ -10,7 +10,6 @@ RUN \
     mkdir -p src \
     && echo "fn main(){}" > src/main.rs \
     && cargo build --release \
-    && ls target \
     && rm -rf src
 
 # Build real binary
@@ -31,8 +30,7 @@ RUN set -e; \
         [ -f /etc/nsswitch.conf ] && cp -v /etc/nsswitch.conf /out/etc/nsswitch.conf || true && \
         for f in /lib/x86_64-linux-gnu/libnss_files.so.2 /lib/x86_64-linux-gnu/libnss_dns.so.2; do \
             [ -f "$f" ] && cp -v --parents "$f" /out || true; \
-        done ; \
-        ls /out
+        done
 
 ########################################
 # Final: scratch with glibc runtime files
