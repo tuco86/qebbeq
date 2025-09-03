@@ -15,3 +15,7 @@ It can be understood as *“the crew of fate”* – those who operate under des
 In this project, it reflects the role of deciding which container images live on and which are removed.  
 
 (And yes, this is just to solve one of the three hard problems in computer science: naming things.)
+
+## License
+
+MIT License. See `LICENSE` for details.
