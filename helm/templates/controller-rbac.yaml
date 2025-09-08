@@ -1,0 +1,31 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "qebbeq-controller.fullname" . }}
+  labels:
+    {{- include "qebbeq-controller.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["qebbeq.tuco86.dev"]
+    resources: ["images"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["qebbeq.tuco86.dev"]
+    resources: ["images/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["qebbeq.tuco86.dev"]
+    resources: ["images/finalizers"]
+    verbs: ["update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "qebbeq-controller.fullname" . }}
+  labels:
+    {{- include "qebbeq-controller.labels" . | nindent 4 }}
+roleRef:
+  kind: ClusterRole
+  name: {{ include "qebbeq-controller.fullname" . }}
+  apiGroup: rbac.authorization.k8s.io
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "qebbeq-controller.fullname" . }}
+    namespace: {{ .Release.Namespace }}
