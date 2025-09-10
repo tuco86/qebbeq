@@ -475,8 +475,11 @@ fn detect_controller_namespace(explicit: &Option<String>) -> String {
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     if args.print_crd {
-        let crd = Image::crd();
-        println!("{}", serde_yaml::to_string(&crd)?);
+        let mut docs = Vec::new();
+        docs.push(serde_yaml::to_value(Image::crd())?);
+        docs.push(serde_yaml::to_value(ImageMirror::crd())?);
+        // Print as multi-document YAML
+        for (i, d) in docs.iter().enumerate() { if i>0 { println!("---"); } println!("{}", serde_yaml::to_string(d)?); }
         return Ok(());
     }
 
