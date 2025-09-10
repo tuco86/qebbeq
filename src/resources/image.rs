@@ -28,6 +28,12 @@ pub struct ImageStatus {
     pub references: BTreeSet<ObjectKey>,
     /// When the last reference was removed (RFC3339)
     pub last_unreferenced: Option<DateTime<Utc>>,
+    /// Whether the image blob has been mirrored/pulled into the managed registry (None = unknown/not attempted)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mirrored: Option<bool>,
+    /// Last time a mirror (pull/push) completed successfully
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_mirror_time: Option<DateTime<Utc>>,
     /// Standard Kubernetes-style conditions (e.g., Ready)
     #[serde(default)]
     pub conditions: Vec<Condition>,

@@ -55,8 +55,14 @@ async fn reconcile_image(client: Client, image: Image, provided_refs: &BTreeSet<
     } else {
         status.last_unreferenced = None;
     }
-    // For now, mark Ready as True when referenced, Unknown otherwise (placeholder for registry availability)
-    upsert_ready_condition(&mut status.conditions, if has_refs { "True" } else { "Unknown" }, None, None);
+    // Ready semantics:
+    // - If there are references and image has been mirrored (status.mirrored == Some(true)) => Ready=True
+    // - If there are references but not yet mirrored (None/false) => Ready=Unknown
+    // - If no references => Ready=Unknown (could be pruned later)
+    let ready_status = if has_refs {
+        match status.mirrored { Some(true) => "True", _ => "Unknown" }
+    } else { "Unknown" };
+    upsert_ready_condition(&mut status.conditions, ready_status, None, None);
 
     // Patch status if changed
     let patch_needed = image.status.as_ref() != Some(&status);
