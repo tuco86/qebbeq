@@ -21,7 +21,9 @@ use std::fs;
 
 // main moved to bottom so helper fns are in scope
 
-async fn reconcile_image(images: Api<Image>, image: Image, provided_refs: &BTreeSet<ObjectKey>, retention: Duration) -> anyhow::Result<()> {
+async fn reconcile_image(client: Client, image: Image, provided_refs: &BTreeSet<ObjectKey>, retention: Duration) -> anyhow::Result<()> {
+    let ns = image.namespace().unwrap_or_default();
+    let images: Api<Image> = Api::namespaced(client.clone(), &ns);
     // Ensure our finalizer is present early
     const FINALIZER: &str = "qebbeq.tuco86.dev/finalizer";
     let is_deleting = image.metadata.deletion_timestamp.is_some();
@@ -35,9 +37,11 @@ async fn reconcile_image(images: Api<Image>, image: Image, provided_refs: &BTree
         let mut fins = image.metadata.finalizers.clone().unwrap_or_default();
         fins.push(FINALIZER.to_string());
         let patch = serde_json::json!({ "metadata": { "finalizers": fins } });
-        let _ = images
+        if let Err(e) = images
             .patch(&image.name_any(), &PatchParams::apply("qebbeq").force(), &Patch::Merge(&patch))
-            .await?;
+            .await {
+            tracing::warn!(error=?e, name=%image.name_any(), "failed to add finalizer");
+        }
     }
 
     // Sync references to provided set
@@ -58,9 +62,15 @@ async fn reconcile_image(images: Api<Image>, image: Image, provided_refs: &BTree
     let patch_needed = image.status.as_ref() != Some(&status);
     if patch_needed {
         let ps = serde_json::json!({ "status": status });
-        let _ = images
+        if let Err(e) = images
             .patch_status(&image.name_any(), &PatchParams::default(), &Patch::Merge(&ps))
-            .await?;
+            .await {
+            tracing::warn!(error=?e, name=%image.name_any(), "patch_status failed; attempting full merge patch");
+            let full = serde_json::json!({"status": ps["status"]});
+            if let Err(e2) = images.patch(&image.name_any(), &PatchParams::default(), &Patch::Merge(&full)).await {
+                tracing::error!(error=?e2, name=%image.name_any(), "fallback status merge failed");
+            }
+        }
     }
 
     // If deleting and no refs -> remove finalizer immediately; skip retention
@@ -74,10 +84,12 @@ async fn reconcile_image(images: Api<Image>, image: Image, provided_refs: &BTree
             .into_iter()
             .filter(|f| f != FINALIZER)
             .collect();
-        let patch = serde_json::json!({ "metadata": { "finalizers": new_fins } });
-        let _ = images
+    let patch = serde_json::json!({ "metadata": { "finalizers": new_fins } });
+    if let Err(e) = images
             .patch(&name, &PatchParams::default(), &Patch::Merge(&patch))
-            .await?;
+            .await {
+            tracing::warn!(error=?e, name=%name, "failed to remove finalizer immediately");
+        }
     }
 
     // If not deleting and no refs -> schedule delayed finalizer removal based on retention
@@ -88,11 +100,12 @@ async fn reconcile_image(images: Api<Image>, image: Image, provided_refs: &BTree
         let name = image.name_any();
 
         // Spawn a delayed task that re-checks and removes finalizer if still unreferenced
-        let images_clone = images.clone();
+    let client_clone = client.clone();
         let refs_snapshot = provided_refs.clone();
         tokio::spawn(async move {
             if !remaining.is_zero() { tokio::time::sleep(remaining).await; }
-            if let Ok(current) = images_clone.get(&name).await {
+            let images_ns: Api<Image> = Api::namespaced(client_clone.clone(), &ns);
+            if let Ok(current) = images_ns.get(&name).await {
                 let still_zero = refs_snapshot.is_empty() && current.status.as_ref().map(|s| s.references.is_empty()).unwrap_or(true);
                 let has_finalizer = current
                     .metadata
@@ -111,9 +124,9 @@ async fn reconcile_image(images: Api<Image>, image: Image, provided_refs: &BTree
                         .filter(|f| f != FINALIZER)
                         .collect();
                     let patch = serde_json::json!({ "metadata": { "finalizers": new_fins } });
-                    let _ = images_clone
-                        .patch(&name, &PatchParams::default(), &Patch::Merge(&patch))
-                        .await;
+                    if let Err(e) = images_ns.patch(&name, &PatchParams::default(), &Patch::Merge(&patch)).await {
+                        tracing::warn!(error=?e, name=%name, "failed to remove finalizer after retention");
+                    }
                 }
             }
         });
@@ -217,7 +230,7 @@ async fn run_image_watcher(token: CancellationToken, images_api: Api<Image>, cli
                             watcher::Event::Apply(img) | watcher::Event::InitApply(img) => {
                                 let img_ref = img.spec.image.clone();
                                 let refs = by_image.get(&img_ref).cloned().unwrap_or_default();
-                                let _ = reconcile_image(images_api.clone(), img, &refs, retention).await;
+                                let _ = reconcile_image(client.clone(), img, &refs, retention).await;
                             }
                             watcher::Event::Delete(_img) => {}
                             watcher::Event::Init | watcher::Event::InitDone => {}
@@ -261,7 +274,7 @@ async fn run_image_watcher(token: CancellationToken, images_api: Api<Image>, cli
                             if let Some(image_objs) = find_image_crs(&images_api, &image_ref).await? {
                                 for img in image_objs {
                                     let refs = by_image.get(&image_ref).cloned().unwrap_or_default();
-                                    let _ = reconcile_image(images_api.clone(), img, &refs, retention).await;
+                                    let _ = reconcile_image(client.clone(), img, &refs, retention).await;
                                 }
                             }
                         }
@@ -276,7 +289,7 @@ async fn run_image_watcher(token: CancellationToken, images_api: Api<Image>, cli
                                 if let Some(image_objs) = find_image_crs(&images_api, &img_ref).await? {
                                     for img in image_objs {
                                         let refs = by_image.get(&img_ref).cloned().unwrap_or_default();
-                                        let _ = reconcile_image(images_api.clone(), img, &refs, retention).await;
+                                        let _ = reconcile_image(client.clone(), img, &refs, retention).await;
                                     }
                                 }
                             }
