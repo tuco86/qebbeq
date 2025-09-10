@@ -19,3 +19,36 @@ In this project, it reflects the role of deciding which container images live on
 ## License
 
 MIT License. See `LICENSE` for details.
+
+## Custom Resources
+
+### Image (qebbeq.tuco86.dev/v1alpha1)
+Tracks a concrete image reference observed in workload specs.
+Fields:
+* spec.image
+* status.references (set of referencing objects)
+* status.mirrored (bool, placeholder until real mirroring implemented)
+* status.last_mirror_time
+* status.last_unreferenced
+* status.conditions (Ready)
+
+### ImageMirror (qebbeq.tuco86.dev/v1alpha1)
+Configures upstream repository access & optional polling.
+Fields:
+* spec.upstreamRegistry
+* spec.repository
+* spec.policy: IfNotPresent | Poll(intervalSeconds)
+* status.lastSyncTime
+* status.conditions (Ready, etc.)
+
+### Generate CRDs
+```
+qebbeq --print-crd
+```
+Prints multi-document YAML for Image and ImageMirror.
+
+## Roadmap
+* Integrate real mirroring (crane) instead of placeholder mirrored=true.
+* Error/backoff & detailed conditions for failures.
+* Tag discovery and on-demand copy when referenced.
+* Metrics & observability for mirror/pull success rates.
