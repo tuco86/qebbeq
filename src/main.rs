@@ -10,6 +10,7 @@ use kube::api::{Patch, PatchParams};
 use kube::runtime::{watcher, watcher::Config};
 mod resources;
 use resources::image::{Image, upsert_ready_condition, ObjectKey};
+use resources::imagemirror::{ImageMirror, MirrorPolicy, upsert_condition as upsert_mirror_condition};
 use tokio::sync::mpsc;
 use k8s_openapi::api::core::v1::Pod;
 use tokio::task::JoinSet;
@@ -218,6 +219,106 @@ struct ControllerConfig {
     registry_host: String,
 }
 
+// ---------------- ImageMirror watcher & polling scheduler (Step 1) ----------------
+
+use std::collections::HashMap;
+#[derive(Debug, Clone, Hash, Eq, PartialEq)]
+struct MirrorKey { ns: String, name: String }
+
+async fn patch_imagemirror_status(api: &Api<ImageMirror>, mirror: &ImageMirror, last_sync: Option<chrono::DateTime<chrono::Utc>>, ready: &str, reason: Option<&str>, message: Option<&str>) {
+    let mut status = mirror.status.clone().unwrap_or_default();
+    if let Some(ts) = last_sync { status.last_sync_time = Some(ts); }
+    upsert_mirror_condition(&mut status.conditions, "Ready", ready, reason, message);
+    let ps = serde_json::json!({"status": status});
+    if let Err(e) = api.patch_status(&mirror.name_any(), &PatchParams::default(), &Patch::Merge(&ps)).await {
+        tracing::warn!(error=?e, mirror=%mirror.name_any(), "failed to patch ImageMirror status");
+    }
+}
+
+async fn run_imagemirror_watcher(token: CancellationToken, client: Client) -> anyhow::Result<()> {
+    let api: Api<ImageMirror> = Api::all(client.clone());
+    let mut stream = watcher(api.clone(), Config::default()).boxed();
+    // map of active poll tasks keyed by mirror key
+    let mut poll_tasks: HashMap<MirrorKey, CancellationToken> = HashMap::new();
+
+    loop {
+        tokio::select! {
+            _ = token.cancelled() => { break; }
+            ev = stream.try_next() => {
+                match ev {
+                    Ok(Some(event)) => match event {
+                        watcher::Event::Apply(m) | watcher::Event::InitApply(m) => {
+                            let key = MirrorKey { ns: m.namespace().unwrap_or_default(), name: m.name_any() };
+                            // Cancel existing poller if any (will recreate below if still Poll)
+                            if let Some(cancel) = poll_tasks.remove(&key) { cancel.cancel(); }
+                            match &m.spec.policy {
+                                MirrorPolicy::IfNotPresent => {
+                                    patch_imagemirror_status(&api, &m, None, "True", Some("Accepted"), Some("Lazy fetch (IfNotPresent)" )).await;
+                                }
+                                MirrorPolicy::Poll { interval_seconds } => {
+                                    patch_imagemirror_status(&api, &m, None, "True", Some("Polling"), Some("Active polling" )).await;
+                                    let child_cancel = CancellationToken::new();
+                                    let child_cancel_clone = child_cancel.clone();
+                                    let api_clone = api.clone();
+                                    let name = m.name_any();
+                                    let ns = key.ns.clone();
+                                    let interval = Duration::from_secs((*interval_seconds).into());
+                                    let outer_token = token.clone();
+                                    tokio::spawn(async move {
+                                        let mirrors_ns: Api<ImageMirror> = Api::namespaced(api_clone.clone().into_client(), &ns);
+                                        loop {
+                                            tokio::select! {
+                                                _ = child_cancel_clone.cancelled() => break,
+                                                _ = outer_token.cancelled() => break,
+                                                _ = tokio::time::sleep(interval) => {
+                                                    // Fetch current to ensure it still exists & policy is Poll
+                                                    match mirrors_ns.get_opt(&name).await {
+                                                        Ok(Some(cur)) => {
+                                                            if let MirrorPolicy::Poll { .. } = cur.spec.policy {
+                                                                // Placeholder trigger; real mirroring in Step 2
+                                                                tracing::info!(mirror=%name, namespace=%ns, "poll tick (placeholder)");
+                                                                // Update last_sync_time to show activity
+                                                                let now = Utc::now();
+                                                                let mut status = cur.status.clone().unwrap_or_default();
+                                                                status.last_sync_time = Some(now);
+                                                                upsert_mirror_condition(&mut status.conditions, "Ready", "True", Some("Polling"), Some("Poll tick"));
+                                                                let ps = serde_json::json!({"status": status});
+                                                                if let Err(e) = mirrors_ns.patch_status(&name, &PatchParams::default(), &Patch::Merge(&ps)).await {
+                                                                    tracing::warn!(error=?e, mirror=%name, "failed to patch poll tick status");
+                                                                }
+                                                            } else { break; }
+                                                        }
+                                                        Ok(None) => break, // mirror deleted
+                                                        Err(e) => {
+                                                            tracing::warn!(error=?e, mirror=%name, "error fetching mirror during poll");
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        tracing::debug!(mirror=%name, namespace=%ns, "poll task exiting");
+                                    });
+                                    poll_tasks.insert(key, child_cancel);
+                                }
+                            }
+                        }
+                        watcher::Event::Delete(m) => {
+                            let key = MirrorKey { ns: m.namespace().unwrap_or_default(), name: m.name_any() };
+                            if let Some(cancel) = poll_tasks.remove(&key) { cancel.cancel(); }
+                        }
+                        watcher::Event::Init | watcher::Event::InitDone => {}
+                    },
+                    Ok(None) => break,
+                    Err(e) => { tracing::error!(error=?e, "imagemirror watcher stream error"); }
+                }
+            }
+        }
+    }
+    // Cancel any remaining pollers
+    for (_, c) in poll_tasks.into_iter() { c.cancel(); }
+    Ok(())
+}
+
 async fn run_image_watcher(token: CancellationToken, images_api: Api<Image>, client: Client, mut rx: mpsc::Receiver<ReferenceUpdate>, retention: Duration, cfg: ControllerConfig) -> anyhow::Result<()> {
     // Indices
     let mut by_resource: BTreeMap<ObjectKey, BTreeSet<String>> = BTreeMap::new();
@@ -407,6 +508,13 @@ async fn main() -> anyhow::Result<()> {
         let client_clone = client.clone();
     let cfg_clone = cfg.clone();
     set.spawn(async move { run_image_watcher(t, images_api, client_clone, rx, args.retention, cfg_clone).await });
+    }
+
+    // ImageMirror watcher (Step 1 skeleton)
+    {
+        let t = token.clone();
+        let client_clone = client.clone();
+        set.spawn(async move { run_imagemirror_watcher(t, client_clone).await });
     }
 
     let result: anyhow::Result<()> = tokio::select! {

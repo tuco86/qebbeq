@@ -1,0 +1,12 @@
+registry:
+  ingress:
+    enabled: true
+    annotations:
+      route.openshift.io/termination: edge
+      # kubernetes.io/ingress.class: nginx
+      # kubernetes.io/tls-acme: "true"
+    hosts:
+      - host: oci.apps.ocp-demo.ars.de
+        paths:
+          - path: /
+            pathType: ImplementationSpecific
