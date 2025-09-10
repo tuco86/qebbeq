@@ -56,14 +56,14 @@ async fn reconcile_image(client: Client, image: Image, provided_refs: &BTreeSet<
     } else {
         status.last_unreferenced = None;
     }
-    // Ready semantics:
-    // - If there are references and image has been mirrored (status.mirrored == Some(true)) => Ready=True
-    // - If there are references but not yet mirrored (None/false) => Ready=Unknown
-    // - If no references => Ready=Unknown (could be pruned later)
-    let ready_status = if has_refs {
-        match status.mirrored { Some(true) => "True", _ => "Unknown" }
-    } else { "Unknown" };
-    upsert_ready_condition(&mut status.conditions, ready_status, None, None);
+    // Mirroring integration (Step 2 placeholder): if referenced and not mirrored, mark mirrored immediately.
+    if has_refs && status.mirrored != Some(true) {
+        status.mirrored = Some(true); // future: invoke actual crane copy before setting true
+        status.last_mirror_time = Some(Utc::now());
+    }
+    // Ready semantics: referenced & mirrored => True else Unknown
+    let ready_status = if has_refs && status.mirrored == Some(true) { "True" } else { "Unknown" };
+    upsert_ready_condition(&mut status.conditions, ready_status, Some("Reconciled"), None);
 
     // Patch status if changed
     let patch_needed = image.status.as_ref() != Some(&status);
