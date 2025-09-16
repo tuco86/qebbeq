@@ -37,6 +37,7 @@ use serde::{Deserialize, Serialize};
     printcolumn = r#"{"name":"Registry","type":"string","jsonPath": ".spec.upstreamRegistry"}"#,
     printcolumn = r#"{"name":"Repository","type":"string","jsonPath": ".spec.repository"}"#,
     printcolumn = r#"{"name":"Policy","type":"string","jsonPath": ".spec.policy.type"}"#,
+    printcolumn = r#"{"name":"Platforms","type":"string","jsonPath": ".spec.platforms"}"#,
     printcolumn = r#"{"name":"LastSync","type":"date","jsonPath": ".status.lastSyncTime"}"#
 )]
 pub struct ImageMirrorSpec {
@@ -47,7 +48,12 @@ pub struct ImageMirrorSpec {
     pub repository: String,
     /// Mirroring policy controlling when we attempt to fetch new tags/digests
     pub policy: MirrorPolicy,
+    /// Desired platforms to mirror (e.g. ["linux/amd64", "linux/arm64"]). Defaults to ["linux/amd64"].
+    #[serde(default = "default_platforms")]
+    pub platforms: Vec<String>,
 }
+
+fn default_platforms() -> Vec<String> { vec!["linux/amd64".to_string()] }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "camelCase")]
