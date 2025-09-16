@@ -18,13 +18,14 @@ use tokio::signal;
 use tokio_util::sync::CancellationToken;
 use sha2::{Sha256, Digest};
 use std::fs;
+use tokio::process::Command;
 
 
 // main moved to bottom so helper fns are in scope
 
 async fn reconcile_image(client: Client, image: Image, provided_refs: &BTreeSet<ObjectKey>, retention: Duration) -> anyhow::Result<()> {
-    let ns = image.namespace().unwrap_or_default();
-    let images: Api<Image> = Api::namespaced(client.clone(), &ns);
+    let _ns = image.namespace().unwrap_or_default();
+    let images: Api<Image> = Api::namespaced(client.clone(), &_ns);
     // Ensure our finalizer is present early
     const FINALIZER: &str = "qebbeq.tuco86.dev/finalizer";
     let is_deleting = image.metadata.deletion_timestamp.is_some();
@@ -56,10 +57,14 @@ async fn reconcile_image(client: Client, image: Image, provided_refs: &BTreeSet<
     } else {
         status.last_unreferenced = None;
     }
-    // Mirroring integration (Step 2 placeholder): if referenced and not mirrored, mark mirrored immediately.
+    // Mirroring integration: if referenced and not mirrored, attempt mirror via crane
     if has_refs && status.mirrored != Some(true) {
-        status.mirrored = Some(true); // future: invoke actual crane copy before setting true
-        status.last_mirror_time = Some(Utc::now());
+        if let Err(e) = mirror_with_crane_for_image(&client, &image).await {
+            tracing::warn!(error=?e, image=%image.name_any(), "crane mirror failed (leaving mirrored unset)");
+        } else {
+            status.mirrored = Some(true);
+            status.last_mirror_time = Some(Utc::now());
+        }
     }
     // Ready semantics: referenced & mirrored => True else Unknown
     let ready_status = if has_refs && status.mirrored == Some(true) { "True" } else { "Unknown" };
@@ -108,10 +113,11 @@ async fn reconcile_image(client: Client, image: Image, provided_refs: &BTreeSet<
 
         // Spawn a delayed task that re-checks and removes finalizer if still unreferenced
     let client_clone = client.clone();
+    let ns_clone = _ns.clone();
         let refs_snapshot = provided_refs.clone();
         tokio::spawn(async move {
             if !remaining.is_zero() { tokio::time::sleep(remaining).await; }
-            let images_ns: Api<Image> = Api::namespaced(client_clone.clone(), &ns);
+            let images_ns: Api<Image> = Api::namespaced(client_clone.clone(), &ns_clone);
             if let Ok(current) = images_ns.get(&name).await {
                 let still_zero = refs_snapshot.is_empty() && current.status.as_ref().map(|s| s.references.is_empty()).unwrap_or(true);
                 let has_finalizer = current
@@ -139,6 +145,78 @@ async fn reconcile_image(client: Client, image: Image, provided_refs: &BTreeSet<
         });
     }
 
+    Ok(())
+}
+
+// Crane integration: best-effort copy for the referenced image based on matching ImageMirror
+async fn mirror_with_crane_for_image(client: &Client, image: &Image) -> anyhow::Result<()> {
+    // Determine upstream by looking up ImageMirror in controller namespace
+    let _ns = image.namespace().unwrap_or_default();
+    // We aggregate Image CRs in controller namespace; ImageMirror is namespaced, we look cluster-wide then prefer same ns
+    let mirrors: Api<ImageMirror> = Api::all(client.clone());
+    let src_ref = &image.spec.image; // expected local ref
+    // Extract repo path after hostname, up to tag/digest
+    let local_repo = {
+        let bytes = src_ref.as_bytes();
+    // find first '/'
+    let i = if let Some(slash) = src_ref.find('/') { slash + 1 } else { 0 };
+        let mut j = bytes.len();
+        if let Some(at) = src_ref[i..].find('@') { j = i + at; }
+        if let Some(col) = src_ref[i..].rfind(':') {
+            // only treat ':' as tag if it is after last '/'
+            let abs = i + col;
+            if let Some(last_slash) = src_ref.rfind('/') { if abs > last_slash { j = j.min(abs); } }
+        }
+        &src_ref[i..j]
+    };
+    let list = mirrors.list(&Default::default()).await?;
+    // Find first mirror whose repository suffix matches local_repo (simple heuristic)
+    // Prefer exact match on repository suffix; if multiple, prefer ones in controller namespace
+    let mut candidates: Vec<ImageMirror> = list.into_iter().filter(|m| m.spec.repository.ends_with(local_repo)).collect();
+    // Stable sort: same-namespace first (if Image and Mirror share ns); then by name
+    let image_ns = image.namespace();
+    candidates.sort_by_key(|m| (if Some(m.namespace().unwrap_or_default()) == image_ns { 0 } else { 1 }, m.name_any()));
+    let candidate = candidates.into_iter().next();
+    let Some(mirror) = candidate else {
+        anyhow::bail!("no ImageMirror found matching repo {local_repo}");
+    };
+
+    // Build upstream source ref: <upstreamRegistry>/<repository> plus tag/digest from local spec.image
+    let (tag_or_digest, _is_digest) = extract_tag_or_digest(src_ref);
+    let upstream = format!("{}/{}{}", mirror.spec.upstream_registry, mirror.spec.repository, tag_or_digest.unwrap_or_default());
+    // Destination is the local image spec.image as-is
+    let dest = src_ref.clone();
+    // For each requested platform perform a multi-platform copy. If multiple platforms are specified, run sequential copies.
+    if mirror.spec.platforms.len() > 1 {
+        tracing::warn!(platforms=?mirror.spec.platforms, "multiple platforms specified; using first only for initial implementation");
+    }
+    let plat = mirror.spec.platforms.get(0).map(|s| s.as_str());
+    crane_copy(&upstream, &dest, plat).await?;
+    Ok(())
+}
+
+fn extract_tag_or_digest(image_ref: &str) -> (Option<String>, bool) {
+    if let Some(idx) = image_ref.find('@') { return (Some(image_ref[idx..].to_string()), true); }
+    if let Some(idx) = image_ref.rfind(':') {
+        // ensure ':' is after last '/'
+        if let Some(slash) = image_ref.rfind('/') { if idx > slash { return (Some(image_ref[idx..].to_string()), false); } }
+    }
+    (None, false)
+}
+
+async fn crane_copy(src: &str, dst: &str, platform: Option<&str>) -> anyhow::Result<()> {
+    let mut cmd = Command::new("crane");
+    cmd.arg("copy");
+    if let Some(p) = platform { cmd.arg("--platform").arg(p); }
+    cmd.arg(src).arg(dst);
+    tracing::info!(src=%src, dst=%dst, platform=?platform, "running crane copy");
+    let output = cmd.output().await.map_err(|e| anyhow::anyhow!("failed to spawn 'crane': {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        tracing::error!(code=?output.status.code(), %stderr, %stdout, "crane copy failed");
+        anyhow::bail!("crane copy failed");
+    }
     Ok(())
 }
 

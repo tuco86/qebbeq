@@ -9,7 +9,7 @@ homepage = "https://github.com/tuco86/qebbeq"
 readme = "README.md"
 
 [dependencies]
-tokio = { version = "1.47.1", features = ["macros", "rt"] }
+tokio = { version = "1.47.1", features = ["macros", "rt", "process"] }
 tokio-util = { version = "0.7.16" }
 futures = { version = "0.3.31" }
 kube = { version = "1.1.0", features = ["runtime", "derive", "admission"] }
