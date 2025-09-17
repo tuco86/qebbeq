@@ -4,6 +4,7 @@ FROM rust:1.89-slim AS builder
 WORKDIR /app
 
 ENV CRANE_VERSION=0.20.6
+ENV COSIGN_VERSION=2.6.0
 
 # Install curl
 RUN \
@@ -20,7 +21,7 @@ RUN set -e; \
     done
 
 # Install CA-certificates
-RUN set -e; \
+RUN \
     mkdir -p /out/etc/ssl/certs \
     && cp -v /etc/ssl/certs/ca-certificates.crt /out/etc/ssl/certs/ca-certificates.crt
 
@@ -30,6 +31,14 @@ RUN \
     && arch=$(dpkg --print-architecture) \
     && curl -fsSL "https://github.com/google/go-containerregistry/releases/download/v${CRANE_VERSION}/go-containerregistry_Linux_${arch}.tar.gz" | tar -xz -C /out/usr/bin crane \
     && chown root:root /out/usr/bin/crane
+
+# Install cosign (linux static)
+RUN \
+    mkdir -p /out/usr/bin \
+    && arch=$(dpkg --print-architecture) \
+    && curl -fsSL -o /out/usr/bin/cosign "https://github.com/sigstore/cosign/releases/download/v${COSIGN_VERSION}/cosign-linux-${arch}" \
+    && chmod +x /out/usr/bin/cosign \
+    && chown root:root /out/usr/bin/cosign
 
 COPY Cargo.toml Cargo.lock ./
 

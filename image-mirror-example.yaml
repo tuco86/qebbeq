@@ -1,26 +1,3 @@
-apiVersion: qebbeq.tuco86.dev/v1alpha1
-kind: ImageMirror
-metadata:
-  name: docker-io-library-busybox
-  namespace: qebbeq
-spec:
-  # Upstream registry to mirror from
-  upstreamRegistry: docker.io
-  # Upstream repository path within the registry
-  # For Docker Hub "library" images, the repository includes the library/ prefix
-  repository: library/busybox
-  # When to mirror:
-  # - IfNotPresent: lazy copy when first referenced by an Image CR
-  # - Poll: periodically check upstream; set intervalSeconds (e.g., 300 for 5m)
-  policy:
-    type: ifNotPresent
-    # intervalSeconds: 300
-  # Desired platforms to mirror. Default is ["linux/amd64"].
-  # For multi-arch images you can add linux/arm64, but current controller copies only the first entry.
-  platforms:
-    - linux/amd64
-
----
 # Registry-wide mirror for everything under docker.io (fallback for repos without a specific mapping)
 apiVersion: qebbeq.tuco86.dev/v1alpha1
 kind: ImageMirror
