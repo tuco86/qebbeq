@@ -28,7 +28,7 @@ RUN cp -v --parents /etc/ssl/certs/ca-certificates.crt /out
 # Install crane (linux amd64 static)
 RUN \
     mkdir -p /out/usr/bin \
-    && arch=$(dpkg --print-architecture) \
+    && arch=$(dpkg --print-architecture | sed 's/amd64/x86_64/') \
     && url="https://github.com/google/go-containerregistry/releases/download/v${CRANE_VERSION}/go-containerregistry_Linux_${arch}.tar.gz" \
     && echo ${url} \
     && curl -fsSL $url \
