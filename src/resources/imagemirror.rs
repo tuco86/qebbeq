@@ -44,8 +44,9 @@ pub struct ImageMirrorSpec {
     /// Upstream registry hostname (e.g. quay.io or gcr.io)
     #[serde(rename = "upstreamRegistry")]
     pub upstream_registry: String,
-    /// Upstream repository path within the registry (e.g. org/name)
-    pub repository: String,
+    /// Upstream repository path within the registry (e.g. org/name). When omitted, the mirror applies to the entire registry.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
     /// Mirroring policy controlling when we attempt to fetch new tags/digests
     pub policy: MirrorPolicy,
     /// Desired platforms to mirror (e.g. ["linux/amd64", "linux/arm64"]). Defaults to ["linux/amd64"].

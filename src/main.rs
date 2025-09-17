@@ -40,7 +40,7 @@ async fn reconcile_image(client: Client, image: Image, provided_refs: &BTreeSet<
         fins.push(FINALIZER.to_string());
         let patch = serde_json::json!({ "metadata": { "finalizers": fins } });
         if let Err(e) = images
-            .patch(&image.name_any(), &PatchParams::apply("qebbeq").force(), &Patch::Merge(&patch))
+            .patch(&image.name_any(), &PatchParams::default(), &Patch::Merge(&patch))
             .await {
             tracing::warn!(error=?e, name=%image.name_any(), "failed to add finalizer");
         }
@@ -170,9 +170,17 @@ async fn mirror_with_crane_for_image(client: &Client, image: &Image) -> anyhow::
         &src_ref[i..j]
     };
     let list = mirrors.list(&Default::default()).await?;
-    // Find first mirror whose repository suffix matches local_repo (simple heuristic)
-    // Prefer exact match on repository suffix; if multiple, prefer ones in controller namespace
-    let mut candidates: Vec<ImageMirror> = list.into_iter().filter(|m| m.spec.repository.ends_with(local_repo)).collect();
+    // Prefer exact repository match; otherwise fallback to registry-wide mirrors (repository None)
+    let mut exact: Vec<ImageMirror> = Vec::new();
+    let mut registry_wide: Vec<ImageMirror> = Vec::new();
+    for m in list {
+        match &m.spec.repository {
+            Some(repo) if repo == local_repo => exact.push(m),
+            None => registry_wide.push(m),
+            _ => {}
+        }
+    }
+    let mut candidates: Vec<ImageMirror> = if !exact.is_empty() { exact } else { registry_wide };
     // Stable sort: same-namespace first (if Image and Mirror share ns); then by name
     let image_ns = image.namespace();
     candidates.sort_by_key(|m| (if Some(m.namespace().unwrap_or_default()) == image_ns { 0 } else { 1 }, m.name_any()));
@@ -183,7 +191,8 @@ async fn mirror_with_crane_for_image(client: &Client, image: &Image) -> anyhow::
 
     // Build upstream source ref: <upstreamRegistry>/<repository> plus tag/digest from local spec.image
     let (tag_or_digest, _is_digest) = extract_tag_or_digest(src_ref);
-    let upstream = format!("{}/{}{}", mirror.spec.upstream_registry, mirror.spec.repository, tag_or_digest.unwrap_or_default());
+    let upstream_repo = mirror.spec.repository.clone().unwrap_or_else(|| local_repo.to_string());
+    let upstream = format!("{}/{}{}", mirror.spec.upstream_registry, upstream_repo, tag_or_digest.unwrap_or_default());
     // Destination is the local image spec.image as-is
     let dest = src_ref.clone();
     // For each requested platform perform a multi-platform copy. If multiple platforms are specified, run sequential copies.

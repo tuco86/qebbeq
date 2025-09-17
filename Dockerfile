@@ -25,10 +25,11 @@ RUN set -e; \
     && cp -v /etc/ssl/certs/ca-certificates.crt /out/etc/ssl/certs/ca-certificates.crt
 
 # Install crane (linux amd64 static)
-RUN set -e; \
-    arch=$(dpkg --print-architecture) ; \
-    curl -fsSL "https://github.com/google/go-containerregistry/releases/download/v${CRANE_VERSION}/go-containerregistry_Linux_${arch}.tar.gz" | tar -xz -C /out crane ; \
-    chown root:root /out/crane
+RUN \
+    mkdir -p /out/usr/bin \
+    && arch=$(dpkg --print-architecture) \
+    && curl -fsSL "https://github.com/google/go-containerregistry/releases/download/v${CRANE_VERSION}/go-containerregistry_Linux_${arch}.tar.gz" | tar -xz -C /out/usr/bin crane \
+    && chown root:root /out/usr/bin/crane
 
 COPY Cargo.toml Cargo.lock ./
 
@@ -46,11 +47,13 @@ RUN \
     && cargo build --release
 
 # Collect binary and its dynamic deps from the same (trixie) environment
-RUN set -e; \
-    cp -v target/release/qebbeq /out/qebbeq && \
+RUN \
+    cp -v target/release/qebbeq /out/usr/bin/qebbeq \
     # Copy all absolute-path deps (including the dynamic loader) reported by ldd
-    ldd /out/qebbeq | awk '{for (i=1;i<=NF;i++) if ($i ~ /^\//) print $i}' | sort -u | \
-        xargs -r -I '{}' cp -v --parents '{}' /out
+    && ldd /out/usr/bin/qebbeq \
+        | awk '{for (i=1;i<=NF;i++) if ($i ~ /^\//) print $i}' \
+        | sort -u \
+        | xargs -r -I '{}' cp -v --parents '{}' /out
 
 ########################################
 # Final: scratch with glibc runtime files
@@ -64,6 +67,5 @@ COPY --from=builder /out/ /
 USER 65532:65532
 
 ENV RUST_LOG=info
-ENV PATH=/usr/local/bin:${PATH}
 
-ENTRYPOINT ["/qebbeq"]
+ENTRYPOINT ["qebbeq"]
