@@ -12,23 +12,25 @@ RUN \
     && rm -rf /var/lib/apt/lists/*
 
 # NSS bits for DNS resolution
-RUN set -e; \
-    mkdir -p /out/etc && \
-    [ -f /etc/nsswitch.conf ] && cp -v /etc/nsswitch.conf /out/etc/nsswitch.conf || true && \
-    for f in /lib/*-linux-gnu/libnss_files.so.2 /lib/*-linux-gnu/libnss_dns.so.2; do \
-        [ -f "$f" ] && cp -v --parents "$f" /out || true; \
+RUN \
+    mkdir -p /out/etc \
+    && cp -v --parents /etc/nsswitch.conf /out \
+    && for f in \
+        /lib/*-linux-gnu/libnss_files.so.2 \
+        /lib/*-linux-gnu/libnss_dns.so.2 \
+    ; do \
+        cp -v --parents "$f" /out ; \
     done
 
 # Install CA-certificates
-RUN set -e; \
-    mkdir -p /out/etc/ssl/certs \
-    && cp -v /etc/ssl/certs/ca-certificates.crt /out/etc/ssl/certs/ca-certificates.crt
+RUN cp -v --parents /etc/ssl/certs/ca-certificates.crt /out
 
 # Install crane (linux amd64 static)
 RUN \
     mkdir -p /out/usr/bin \
     && arch=$(dpkg --print-architecture) \
-    && curl -fsSL "https://github.com/google/go-containerregistry/releases/download/v${CRANE_VERSION}/go-containerregistry_Linux_${arch}.tar.gz" | tar -xz -C /out/usr/bin crane \
+    && curl -fsSL "https://github.com/google/go-containerregistry/releases/download/v${CRANE_VERSION}/go-containerregistry_Linux_${arch}.tar.gz" \
+        | tar -xz -C /out/usr/bin crane \
     && chown root:root /out/usr/bin/crane
 
 COPY Cargo.toml Cargo.lock ./
