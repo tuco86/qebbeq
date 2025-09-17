@@ -10,7 +10,7 @@ use kube::api::{Patch, PatchParams};
 use kube::runtime::{watcher, watcher::Config};
 mod resources;
 use resources::image::{Image, upsert_ready_condition, ObjectKey};
-use resources::imagemirror::{ImageMirror, MirrorPolicy, upsert_condition as upsert_mirror_condition};
+use resources::imagemirror::{ImageMirror, MirrorPolicyType, upsert_condition as upsert_mirror_condition};
 use tokio::sync::mpsc;
 use k8s_openapi::api::core::v1::Pod;
 use tokio::task::JoinSet;
@@ -329,18 +329,19 @@ async fn run_imagemirror_watcher(token: CancellationToken, client: Client) -> an
                             let key = MirrorKey { ns: m.namespace().unwrap_or_default(), name: m.name_any() };
                             // Cancel existing poller if any (will recreate below if still Poll)
                             if let Some(cancel) = poll_tasks.remove(&key) { cancel.cancel(); }
-                            match &m.spec.policy {
-                                MirrorPolicy::IfNotPresent => {
+                            match m.spec.policy.type_ {
+                                MirrorPolicyType::IfNotPresent => {
                                     patch_imagemirror_status(&api, &m, None, "True", Some("Accepted"), Some("Lazy fetch (IfNotPresent)" )).await;
                                 }
-                                MirrorPolicy::Poll { interval_seconds } => {
+                                MirrorPolicyType::Poll => {
                                     patch_imagemirror_status(&api, &m, None, "True", Some("Polling"), Some("Active polling" )).await;
                                     let child_cancel = CancellationToken::new();
                                     let child_cancel_clone = child_cancel.clone();
                                     let api_clone = api.clone();
                                     let name = m.name_any();
                                     let ns = key.ns.clone();
-                                    let interval = Duration::from_secs((*interval_seconds).into());
+                                    let secs = m.spec.policy.interval_seconds.unwrap_or(300);
+                                    let interval = Duration::from_secs(secs.into());
                                     let outer_token = token.clone();
                                     tokio::spawn(async move {
                                         let mirrors_ns: Api<ImageMirror> = Api::namespaced(api_clone.clone().into_client(), &ns);
@@ -352,7 +353,7 @@ async fn run_imagemirror_watcher(token: CancellationToken, client: Client) -> an
                                                     // Fetch current to ensure it still exists & policy is Poll
                                                     match mirrors_ns.get_opt(&name).await {
                                                         Ok(Some(cur)) => {
-                                                            if let MirrorPolicy::Poll { .. } = cur.spec.policy {
+                                                            if cur.spec.policy.type_ == MirrorPolicyType::Poll {
                                                                 // Placeholder trigger; real mirroring in Step 2
                                                                 tracing::info!(mirror=%name, namespace=%ns, "poll tick (placeholder)");
                                                                 // Update last_sync_time to show activity

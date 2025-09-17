@@ -56,17 +56,22 @@ pub struct ImageMirrorSpec {
 fn default_platforms() -> Vec<String> { vec!["linux/amd64".to_string()] }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
-#[serde(tag = "type", rename_all = "camelCase")]
-pub enum MirrorPolicy {
-    /// Only mirror when a referenced image (tag/digest) is first needed (lazy fetch).
-    IfNotPresent,
-    /// Poll upstream for updates (e.g. new tags or changed tag digests) at a fixed interval.
-    Poll { #[serde(rename = "intervalSeconds")] interval_seconds: u32 },
+pub struct MirrorPolicy {
+    /// Policy type: IfNotPresent | Poll
+    #[serde(rename = "type")]
+    pub type_: MirrorPolicyType,
+    /// Polling interval in seconds (used when type==Poll)
+    #[serde(rename = "intervalSeconds", skip_serializing_if = "Option::is_none")]
+    pub interval_seconds: Option<u32>,
 }
 
 impl Default for MirrorPolicy {
-    fn default() -> Self { MirrorPolicy::IfNotPresent }
+    fn default() -> Self { Self { type_: MirrorPolicyType::IfNotPresent, interval_seconds: None } }
 }
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum MirrorPolicyType { IfNotPresent, Poll }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
 pub struct ImageMirrorStatus {
