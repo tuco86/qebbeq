@@ -29,6 +29,8 @@ RUN cp -v --parents /etc/ssl/certs/ca-certificates.crt /out
 RUN \
     mkdir -p /out/usr/bin \
     && arch=$(dpkg --print-architecture) \
+    && echo ${arch} \
+    && export \
     && curl -fsSL "https://github.com/google/go-containerregistry/releases/download/v${CRANE_VERSION}/go-containerregistry_Linux_${arch}.tar.gz" \
         | tar -xz -C /out/usr/bin crane \
     && chown root:root /out/usr/bin/crane
