@@ -38,16 +38,6 @@ spec:
           {{- end }}
           image: "{{ .Values.controller.image.repository }}:{{ .Values.controller.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.controller.image.pullPolicy }}
-          env:
-            - name: QEBBEQ_REGISTRY_HOST
-              value: "{{ .Values.controller.registryHost }}"
-            - name: QEBBEQ_NAMESPACE
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.namespace
-            {{- with .Values.controller.extraEnv }}
-            {{- toYaml . | nindent 12 }}
-            {{- end }}
           {{- with .Values.controller.livenessProbe }}
           livenessProbe:
             {{- toYaml . | nindent 12 }}

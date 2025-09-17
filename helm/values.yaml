@@ -79,19 +79,6 @@ controller:
 
   affinity: {}
 
-  # Hostname of the managed registry (images from this host are tracked)
-  registryHost: ""
-
-  # Additional environment variables for the controller Pod (e.g., cosign)
-  # Example:
-  # extraEnv:
-  #   - name: QEBBEQ_COSIGN_KEY
-  #     valueFrom:
-  #       secretKeyRef:
-  #         name: cosign-key
-  #         key: cosign.key
-  extraEnv: []
-
 registry:
   enabled: true
 

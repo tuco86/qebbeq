@@ -19,7 +19,6 @@ use tokio_util::sync::CancellationToken;
 use sha2::{Sha256, Digest};
 use std::fs;
 use tokio::process::Command;
-use std::env;
 
 
 // main moved to bottom so helper fns are in scope
@@ -192,18 +191,7 @@ async fn mirror_with_crane_for_image(client: &Client, image: &Image) -> anyhow::
 
     // Build upstream source ref: <upstreamRegistry>/<repository> plus tag/digest from local spec.image
     let (tag_or_digest, _is_digest) = extract_tag_or_digest(src_ref);
-    let upstream_repo = match &mirror.spec.repository {
-        Some(r) => r.clone(),
-        None => {
-            // Registry-wide: strip "<upstreamRegistry>/" prefix from local_repo if present
-            let prefix = format!("{}/", mirror.spec.upstream_registry);
-            if local_repo.starts_with(&prefix) {
-                local_repo[prefix.len()..].to_string()
-            } else {
-                local_repo.to_string()
-            }
-        }
-    };
+    let upstream_repo = mirror.spec.repository.clone().unwrap_or_else(|| local_repo.to_string());
     let upstream = format!("{}/{}{}", mirror.spec.upstream_registry, upstream_repo, tag_or_digest.unwrap_or_default());
     // Destination is the local image spec.image as-is
     let dest = src_ref.clone();
@@ -213,27 +201,6 @@ async fn mirror_with_crane_for_image(client: &Client, image: &Image) -> anyhow::
     }
     let plat = mirror.spec.platforms.get(0).map(|s| s.as_str());
     crane_copy(&upstream, &dest, plat).await?;
-    // Optional: sign destination image with cosign if configured
-    if let Some(key_ref) = env::var_os("QEBBEQ_COSIGN_KEY") {
-        let key = key_ref.to_string_lossy().to_string();
-        let mut cosign = Command::new("cosign");
-        cosign.arg("sign").arg("--yes");
-        cosign.arg("--key").arg(&key);
-        // optional: allow skipping transparency log if asked
-        if let Ok(v) = env::var("QEBBEQ_COSIGN_TLOG_UPLOAD") { if v == "false" || v == "0" { cosign.arg("--no-tlog-upload"); } }
-        // pass for keyless OIDC if requested (not default)
-        if env::var("QEBBEQ_COSIGN_KEYLESS").map(|v| v=="true" || v=="1").unwrap_or(false) { cosign.arg("--identity-token").arg(env::var("QEBBEQ_COSIGN_ID_TOKEN").unwrap_or_default()); }
-        cosign.arg(&dest);
-        tracing::info!(image=%dest, "running cosign sign");
-        let out = cosign.output().await.map_err(|e| anyhow::anyhow!("failed to spawn 'cosign': {e}"))?;
-        if !out.status.success() {
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            tracing::error!(code=?out.status.code(), %stderr, %stdout, image=%dest, "cosign sign failed");
-            // don't hard-fail mirroring, but propagate as error so status remains unset
-            anyhow::bail!("cosign sign failed");
-        }
-    }
     Ok(())
 }
 
@@ -351,11 +318,7 @@ async fn patch_imagemirror_status(api: &Api<ImageMirror>, mirror: &ImageMirror, 
     upsert_mirror_condition(&mut status.conditions, "Ready", ready, reason, message);
     let ps = serde_json::json!({"status": status});
     if let Err(e) = api.patch_status(&mirror.name_any(), &PatchParams::default(), &Patch::Merge(&ps)).await {
-        tracing::warn!(error=?e, mirror=%mirror.name_any(), "failed to patch ImageMirror status (status subresource). falling back to merge patch on root");
-        let full = serde_json::json!({"status": ps["status"]});
-        if let Err(e2) = api.patch(&mirror.name_any(), &PatchParams::default(), &Patch::Merge(&full)).await {
-            tracing::warn!(error=?e2, mirror=%mirror.name_any(), "fallback merge patch of ImageMirror failed");
-        }
+        tracing::warn!(error=?e, mirror=%mirror.name_any(), "failed to patch ImageMirror status");
     }
 }
 
