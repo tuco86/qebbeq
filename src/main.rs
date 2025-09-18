@@ -9,7 +9,7 @@ use kube::core::CustomResourceExt;
 use kube::api::{Patch, PatchParams};
 use kube::runtime::{watcher, watcher::Config};
 mod resources;
-use resources::image::{Image, upsert_ready_condition, ObjectKey};
+use resources::image::{Image, upsert_ready_condition, upsert_image_pull_backoff_condition, ObjectKey};
 use resources::imagemirror::{ImageMirror, MirrorPolicyType};
 use tokio::sync::mpsc;
 use k8s_openapi::api::core::v1::Pod;
@@ -51,25 +51,46 @@ async fn reconcile_image(client: Client, image: Image, provided_refs: &BTreeSet<
     status.references = provided_refs.clone();
     let has_refs = !status.references.is_empty();
     if !has_refs {
-        if status.last_unreferenced.is_none() {
-            status.last_unreferenced = Some(Utc::now());
+        // Set retain_until if not already set
+        if status.retain_until.is_none() {
+            status.retain_until = Some(Utc::now() + chrono::Duration::from_std(retention).unwrap_or(chrono::Duration::seconds(0)));
         }
     } else {
-        status.last_unreferenced = None;
+        status.retain_until = None;
     }
-    // Mirroring integration: if referenced and not mirrored, attempt mirror via crane
-    if has_refs && status.mirrored != Some(true) {
-        if let Err(e) = mirror_with_crane_for_image(&client, &image).await {
-            tracing::warn!(error=?e, image=%image.name_any(), "crane mirror failed (leaving mirrored unset)");
-        } else {
-            status.mirrored = Some(true);
-            status.last_mirror_time = Some(Utc::now());
+    // Mirroring integration: if referenced and not ready, attempt mirror via crane
+    if has_refs {
+        // First, check if destination image already has a digest (presence) and mark Ready if so
+        let dest_ref = &image.spec.image;
+        match crane_digest(dest_ref).await {
+            Ok(Some(d)) => {
+                tracing::debug!(image=%dest_ref, digest=%d, "image already present; marking Ready");
+                upsert_ready_condition(&mut status.conditions, "True", Some("Present"), None);
+                upsert_image_pull_backoff_condition(&mut status.conditions, "False", None, None);
+            }
+            _ => {
+                tracing::debug!(image=%dest_ref, "image not present (or digest lookup failed); attempting mirror");
+                match mirror_with_crane_for_image(&client, &image).await {
+                    Ok(_) => {
+                        status.last_pulled_at = Some(Utc::now());
+                        upsert_ready_condition(&mut status.conditions, "True", Some("Pulled"), None);
+                        upsert_image_pull_backoff_condition(&mut status.conditions, "False", None, None);
+                    }
+                    Err(e) => {
+                        let msg = e.to_string();
+                        upsert_ready_condition(&mut status.conditions, "False", Some("PullError"), Some(&msg));
+                        upsert_image_pull_backoff_condition(&mut status.conditions, "True", Some("PullError"), Some(&msg));
+                    }
+                }
+            }
         }
+    } else {
+        upsert_ready_condition(&mut status.conditions, "Unknown", Some("Unreferenced"), None);
+        upsert_image_pull_backoff_condition(&mut status.conditions, "False", None, None);
     }
-    // Ready semantics: referenced & mirrored => True else Unknown
-    let ready_status = if has_refs && status.mirrored == Some(true) { "True" } else { "Unknown" };
-    upsert_ready_condition(&mut status.conditions, ready_status, Some("Reconciled"), None);
 
+    // Compute phase summary
+    status.phase = Some(status.compute_phase(has_refs, is_deleting));
     // Patch status if changed
     let patch_needed = image.status.as_ref() != Some(&status);
     if patch_needed {
@@ -106,7 +127,7 @@ async fn reconcile_image(client: Client, image: Image, provided_refs: &BTreeSet<
 
     // If not deleting and no refs -> schedule delayed finalizer removal based on retention
     if !is_deleting && !has_refs {
-        let last = status.last_unreferenced.unwrap_or_else(Utc::now);
+    let last = status.retain_until.unwrap_or_else(Utc::now);
         let elapsed = (Utc::now() - last).to_std().unwrap_or_default();
         let remaining = if elapsed >= retention { Duration::ZERO } else { retention - elapsed };
         let name = image.name_any();
@@ -187,6 +208,13 @@ async fn mirror_with_crane_for_image(client: &Client, image: &Image) -> anyhow::
         }
     }
     let dest = src_ref.clone();
+    // Optimization: if destination already has same digest as upstream, skip copy
+    if let (Ok(Some(up_digest)), Ok(Some(dst_digest))) = (crane_digest(&upstream).await, crane_digest(&dest).await) {
+        if up_digest == dst_digest {
+            tracing::info!(image=%dest, digest=%dst_digest, "destination already up-to-date; skipping mirror copy");
+            return Ok(());
+        }
+    }
     if mirror.spec.platforms.len() > 1 {
         tracing::warn!(platforms=?mirror.spec.platforms, "multiple platforms specified; using first only for initial implementation");
     }
@@ -218,6 +246,15 @@ async fn crane_copy(src: &str, dst: &str, platform: Option<&str>) -> anyhow::Res
         anyhow::bail!("crane copy failed");
     }
     Ok(())
+}
+
+async fn crane_digest(reference: &str) -> anyhow::Result<Option<String>> {
+    let mut cmd = Command::new("crane");
+    cmd.arg("digest").arg(reference);
+    let output = cmd.output().await.map_err(|e| anyhow::anyhow!("failed to spawn 'crane digest': {e}"))?;
+    if !output.status.success() { return Ok(None); }
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if stdout.is_empty() { Ok(None) } else { Ok(Some(stdout)) }
 }
 
 // ---------------- Types for reference updates & watchers ----------------
