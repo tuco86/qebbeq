@@ -10,7 +10,7 @@ use kube::api::{Patch, PatchParams};
 use kube::runtime::{watcher, watcher::Config};
 mod resources;
 use resources::image::{Image, upsert_ready_condition, ObjectKey};
-use resources::imagemirror::{ImageMirror, MirrorPolicyType, upsert_condition as upsert_mirror_condition};
+use resources::imagemirror::{ImageMirror, MirrorPolicyType};
 use tokio::sync::mpsc;
 use k8s_openapi::api::core::v1::Pod;
 use tokio::task::JoinSet;
@@ -151,51 +151,42 @@ async fn reconcile_image(client: Client, image: Image, provided_refs: &BTreeSet<
 // Crane integration: best-effort copy for the referenced image based on matching ImageMirror
 async fn mirror_with_crane_for_image(client: &Client, image: &Image) -> anyhow::Result<()> {
     // Determine upstream by looking up ImageMirror in controller namespace
-    let _ns = image.namespace().unwrap_or_default();
-    // We aggregate Image CRs in controller namespace; ImageMirror is namespaced, we look cluster-wide then prefer same ns
     let mirrors: Api<ImageMirror> = Api::all(client.clone());
-    let src_ref = &image.spec.image; // expected local ref
-    // Extract repo path after hostname, up to tag/digest
-    let local_repo = {
-        let bytes = src_ref.as_bytes();
-    // find first '/'
-    let i = if let Some(slash) = src_ref.find('/') { slash + 1 } else { 0 };
-        let mut j = bytes.len();
-        if let Some(at) = src_ref[i..].find('@') { j = i + at; }
-        if let Some(col) = src_ref[i..].rfind(':') {
-            // only treat ':' as tag if it is after last '/'
-            let abs = i + col;
-            if let Some(last_slash) = src_ref.rfind('/') { if abs > last_slash { j = j.min(abs); } }
-        }
-        &src_ref[i..j]
-    };
+    let src_ref = &image.spec.image;
+    // Split src_ref into hostname and path
+    let mut parts = src_ref.splitn(2, '/');
+    let host = parts.next().unwrap_or("");
+    let path = parts.next().unwrap_or("");
     let list = mirrors.list(&Default::default()).await?;
-    // Prefer exact repository match; otherwise fallback to registry-wide mirrors (repository None)
-    let mut exact: Vec<ImageMirror> = Vec::new();
-    let mut registry_wide: Vec<ImageMirror> = Vec::new();
-    for m in list {
-        match &m.spec.repository {
-            Some(repo) if repo == local_repo => exact.push(m),
-            None => registry_wide.push(m),
-            _ => {}
-        }
-    }
-    let mut candidates: Vec<ImageMirror> = if !exact.is_empty() { exact } else { registry_wide };
-    // Stable sort: same-namespace first (if Image and Mirror share ns); then by name
+    // Find all mirrors whose prefix matches the path portion
+    let mut candidates: Vec<&ImageMirror> = list.iter()
+        .filter(|m| path.starts_with(&m.spec.prefix))
+        .collect();
+    // Sort by longest prefix first, then same-namespace, then name
     let image_ns = image.namespace();
-    candidates.sort_by_key(|m| (if Some(m.namespace().unwrap_or_default()) == image_ns { 0 } else { 1 }, m.name_any()));
-    let candidate = candidates.into_iter().next();
-    let Some(mirror) = candidate else {
-        anyhow::bail!("no ImageMirror found matching repo {local_repo}");
+    candidates.sort_by_key(|m| (
+        std::cmp::Reverse(m.spec.prefix.len()),
+        if Some(m.namespace().unwrap_or_default()) == image_ns { 0 } else { 1 },
+        m.name_any()
+    ));
+    let mirror = match candidates.first() {
+        Some(m) => *m,
+        None => {
+            anyhow::bail!("no ImageMirror found matching prefix for image {src_ref}");
+        }
     };
 
-    // Build upstream source ref: <upstreamRegistry>/<repository> plus tag/digest from local spec.image
+    // Build upstream source ref: replace prefix in path with upstream, keep tag/digest
     let (tag_or_digest, _is_digest) = extract_tag_or_digest(src_ref);
-    let upstream_repo = mirror.spec.repository.clone().unwrap_or_else(|| local_repo.to_string());
-    let upstream = format!("{}/{}{}", mirror.spec.upstream_registry, upstream_repo, tag_or_digest.unwrap_or_default());
-    // Destination is the local image spec.image as-is
+    let path_without_prefix = &path[mirror.spec.prefix.len()..];
+    let mut upstream = format!("{}{}", mirror.spec.upstream, path_without_prefix);
+    if let Some(tag) = &tag_or_digest {
+        // Only append tag/digest if not already present
+        if !upstream.ends_with(tag) {
+            upstream.push_str(tag);
+        }
+    }
     let dest = src_ref.clone();
-    // For each requested platform perform a multi-platform copy. If multiple platforms are specified, run sequential copies.
     if mirror.spec.platforms.len() > 1 {
         tracing::warn!(platforms=?mirror.spec.platforms, "multiple platforms specified; using first only for initial implementation");
     }
@@ -312,15 +303,7 @@ use std::collections::HashMap;
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
 struct MirrorKey { ns: String, name: String }
 
-async fn patch_imagemirror_status(api: &Api<ImageMirror>, mirror: &ImageMirror, last_sync: Option<chrono::DateTime<chrono::Utc>>, ready: &str, reason: Option<&str>, message: Option<&str>) {
-    let mut status = mirror.status.clone().unwrap_or_default();
-    if let Some(ts) = last_sync { status.last_sync_time = Some(ts); }
-    upsert_mirror_condition(&mut status.conditions, "Ready", ready, reason, message);
-    let ps = serde_json::json!({"status": status});
-    if let Err(e) = api.patch_status(&mirror.name_any(), &PatchParams::default(), &Patch::Merge(&ps)).await {
-        tracing::warn!(error=?e, mirror=%mirror.name_any(), "failed to patch ImageMirror status");
-    }
-}
+// ...existing code...
 
 async fn run_imagemirror_watcher(token: CancellationToken, client: Client) -> anyhow::Result<()> {
     let api: Api<ImageMirror> = Api::all(client.clone());
@@ -340,10 +323,10 @@ async fn run_imagemirror_watcher(token: CancellationToken, client: Client) -> an
                             if let Some(cancel) = poll_tasks.remove(&key) { cancel.cancel(); }
                             match m.spec.policy.type_ {
                                 MirrorPolicyType::IfNotPresent => {
-                                    patch_imagemirror_status(&api, &m, None, "True", Some("Accepted"), Some("Lazy fetch (IfNotPresent)" )).await;
+                                    // No status patch: ImageMirror has no status
                                 }
                                 MirrorPolicyType::Poll => {
-                                    patch_imagemirror_status(&api, &m, None, "True", Some("Polling"), Some("Active polling" )).await;
+                                    // No status patch: ImageMirror has no status
                                     let child_cancel = CancellationToken::new();
                                     let child_cancel_clone = child_cancel.clone();
                                     let api_clone = api.clone();
@@ -366,14 +349,8 @@ async fn run_imagemirror_watcher(token: CancellationToken, client: Client) -> an
                                                                 // Placeholder trigger; real mirroring in Step 2
                                                                 tracing::info!(mirror=%name, namespace=%ns, "poll tick (placeholder)");
                                                                 // Update last_sync_time to show activity
-                                                                let now = Utc::now();
-                                                                let mut status = cur.status.clone().unwrap_or_default();
-                                                                status.last_sync_time = Some(now);
-                                                                upsert_mirror_condition(&mut status.conditions, "Ready", "True", Some("Polling"), Some("Poll tick"));
-                                                                let ps = serde_json::json!({"status": status});
-                                                                if let Err(e) = mirrors_ns.patch_status(&name, &PatchParams::default(), &Patch::Merge(&ps)).await {
-                                                                    tracing::warn!(error=?e, mirror=%name, "failed to patch poll tick status");
-                                                                }
+                                                                // ...existing code...
+                                                                // No status patch: ImageMirror has no status
                                                             } else { break; }
                                                         }
                                                         Ok(None) => break, // mirror deleted

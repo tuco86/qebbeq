@@ -33,20 +33,16 @@ use serde::{Deserialize, Serialize};
     kind = "ImageMirror",
     plural = "imagemirrors",
     namespaced,
-    status = "ImageMirrorStatus",
-    printcolumn = r#"{"name":"Registry","type":"string","jsonPath": ".spec.upstreamRegistry"}"#,
-    printcolumn = r#"{"name":"Repository","type":"string","jsonPath": ".spec.repository"}"#,
+    printcolumn = r#"{"name":"Upstream","type":"string","jsonPath": ".spec.upstream"}"#,
+    printcolumn = r#"{"name":"Prefix","type":"string","jsonPath": ".spec.prefix"}"#,
     printcolumn = r#"{"name":"Policy","type":"string","jsonPath": ".spec.policy.type"}"#,
-    printcolumn = r#"{"name":"Platforms","type":"string","jsonPath": ".spec.platforms"}"#,
-    printcolumn = r#"{"name":"LastSync","type":"date","jsonPath": ".status.lastSyncTime"}"#
+    printcolumn = r#"{"name":"Platforms","type":"string","jsonPath": ".spec.platforms"}"#
 )]
 pub struct ImageMirrorSpec {
-    /// Upstream registry hostname (e.g. quay.io or gcr.io)
-    #[serde(rename = "upstreamRegistry")]
-    pub upstream_registry: String,
-    /// Upstream repository path within the registry (e.g. org/name). When omitted, the mirror applies to the entire registry.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub repository: Option<String>,
+    /// Upstream registry or full prefix (e.g. quay.io, gcr.io, or gcr.io/org)
+    pub upstream: String,
+    /// Prefix to match in local image refs (e.g. oci.mydomain.com/foo/bar). Longest prefix wins.
+    pub prefix: String,
     /// Mirroring policy controlling when we attempt to fetch new tags/digests
     pub policy: MirrorPolicy,
     /// Desired platforms to mirror (e.g. ["linux/amd64", "linux/arm64"]). Defaults to ["linux/amd64"].
@@ -73,42 +69,3 @@ impl Default for MirrorPolicy {
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub enum MirrorPolicyType { IfNotPresent, Poll }
-
-#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
-pub struct ImageMirrorStatus {
-    /// Last time a sync (lazy or scheduled) successfully occurred
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub last_sync_time: Option<DateTime<Utc>>,
-    /// Standard conditions (Ready, Syncing, Error, etc.)
-    #[serde(default)]
-    pub conditions: Vec<Condition>,
-}
-
-#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
-pub struct Condition {
-    pub type_: String,
-    pub status: String, // "True" | "False" | "Unknown"
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub message: Option<String>,
-    #[serde(rename = "lastTransitionTime", skip_serializing_if = "Option::is_none")]
-    pub last_transition_time: Option<DateTime<Utc>>,
-}
-
-pub fn upsert_condition(conditions: &mut Vec<Condition>, type_: &str, status: &str, reason: Option<&str>, message: Option<&str>) {
-    let now = Utc::now();
-    if let Some(c) = conditions.iter_mut().find(|c| c.type_ == type_) {
-        if c.status != status { c.status = status.to_string(); c.last_transition_time = Some(now); }
-        c.reason = reason.map(|s| s.to_string());
-        c.message = message.map(|s| s.to_string());
-    } else {
-        conditions.push(Condition {
-            type_: type_.into(),
-            status: status.into(),
-            reason: reason.map(|s| s.to_string()),
-            message: message.map(|s| s.to_string()),
-            last_transition_time: Some(now),
-        });
-    }
-}
