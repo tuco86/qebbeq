@@ -155,7 +155,7 @@ async fn mirror_with_crane_for_image(client: &Client, image: &Image) -> anyhow::
     let src_ref = &image.spec.image;
     // Split src_ref into hostname and path
     let mut parts = src_ref.splitn(2, '/');
-    let host = parts.next().unwrap_or("");
+    let _ = parts.next(); // skip host
     let path = parts.next().unwrap_or("");
     let list = mirrors.list(&Default::default()).await?;
     // Find all mirrors whose prefix matches the path portion
